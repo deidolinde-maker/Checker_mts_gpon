@@ -14,8 +14,15 @@ python checker.py
 ```
 
 Прокси задаются только переменными окружения `PROXY_1_URL` и `PROXY_2_URL`; значения с
-учётными данными не коммитятся. `PROXIES_ENABLED=false` отключает proxy preflight и
-запускает checker напрямую. Отчёт создаётся в `REPORT_FILE` (по умолчанию
+учётными данными не коммитятся. Поддерживаются значения Secret Text в форматах:
+
+```text
+185.183.160.117:8000:USERNAME:PASSWORD
+http://USERNAME:PASSWORD@185.183.160.117:8000
+```
+
+Первый формат автоматически преобразуется checker-ом. `PROXIES_ENABLED=false` отключает
+proxy preflight и запускает checker напрямую. Отчёт создаётся в `REPORT_FILE` (по умолчанию
 `mts_gpon_report.json`).
 
 ## Jenkins
@@ -27,6 +34,11 @@ Secret Text credentials для проверки страниц: `mts_gpon_proxy_
 `tg_proxy_creds_survarius`. Агент должен
 иметь Python 3, доступ к PyPI и возможность установить Chromium. Pipeline поддерживает
 Unix и Windows agents, отключает параллельные сборки и архивирует JSON-отчёт.
+
+На Unix Jenkins agent зависимости сохраняются в `/var/lib/jenkins/shared/Checker_mts_gpon/venv`,
+pip cache — в `/var/lib/jenkins/.cache/pip`, а Playwright browsers — в
+`/var/lib/jenkins/.cache/ms-playwright`. Поэтому повторные builds не создают новый venv и
+не скачивают Chromium заново, если версия уже установлена.
 
 ## QA coverage
 

@@ -14,6 +14,10 @@ pipeline {
         PYTHONUNBUFFERED = '1'
         REPORT_FILE = 'mts_gpon_report.json'
         PROXIES_ENABLED = 'true'
+        CHECKER_CACHE_DIR = '/var/lib/jenkins/shared/Checker_mts_gpon'
+        VENV_DIR = '/var/lib/jenkins/shared/Checker_mts_gpon/venv'
+        PIP_CACHE_DIR = '/var/lib/jenkins/.cache/pip'
+        PLAYWRIGHT_BROWSERS_PATH = '/var/lib/jenkins/.cache/ms-playwright'
     }
 
     stages {
@@ -21,11 +25,19 @@ pipeline {
             steps {
                 script {
                     if (isUnix()) {
-                        sh 'python3 -m venv .venv'
-                        sh '. .venv/bin/activate && python -m pip install --upgrade pip && pip install -r requirements.txt && playwright install chromium'
+                        sh '''
+                            set -e
+                            mkdir -p "$CHECKER_CACHE_DIR" "$PIP_CACHE_DIR" "$PLAYWRIGHT_BROWSERS_PATH"
+                            if [ ! -x "$VENV_DIR/bin/python" ]; then python3 -m venv "$VENV_DIR"; fi
+                            "$VENV_DIR/bin/python" -m pip install -r requirements.txt
+                            "$VENV_DIR/bin/python" -m playwright install chromium
+                        '''
                     } else {
-                        bat 'py -m venv .venv'
-                        bat '.venv\\Scripts\\python.exe -m pip install --upgrade pip && .venv\\Scripts\\pip.exe install -r requirements.txt && .venv\\Scripts\\playwright.exe install chromium'
+                        bat '''
+                            if not exist "%VENV_DIR%\\Scripts\\python.exe" py -m venv "%VENV_DIR%"
+                            "%VENV_DIR%\\Scripts\\python.exe" -m pip install -r requirements.txt
+                            "%VENV_DIR%\\Scripts\\python.exe" -m playwright install chromium
+                        '''
                     }
                 }
                 withCredentials([
@@ -34,9 +46,9 @@ pipeline {
                 ]) {
                     script {
                         if (isUnix()) {
-                            sh '. .venv/bin/activate && python -m pytest -q tests && python checker.py'
+                            sh '"$VENV_DIR/bin/python" -m pytest -q tests && "$VENV_DIR/bin/python" checker.py'
                         } else {
-                            bat '.venv\\Scripts\\python.exe -m pytest -q tests && .venv\\Scripts\\python.exe checker.py'
+                            bat '"%VENV_DIR%\\Scripts\\python.exe" -m pytest -q tests && "%VENV_DIR%\\Scripts\\python.exe" checker.py'
                         }
                     }
                 }
@@ -56,9 +68,9 @@ pipeline {
                     string(credentialsId: 'tg_proxy_creds_survarius', variable: 'TELEGRAM_PROXY_CREDS')
                 ]) {
                     if (isUnix()) {
-                        sh '. .venv/bin/activate && python notify.py || true'
+                        sh '"$VENV_DIR/bin/python" notify.py || true'
                     } else {
-                        bat '.venv\\Scripts\\python.exe notify.py'
+                        bat '"%VENV_DIR%\\Scripts\\python.exe" notify.py'
                     }
                 }
             }

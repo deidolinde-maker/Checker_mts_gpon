@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from checker import VersionDetectionError, choose_proxy, classify_navigation_error, detect_variant, is_allowed_url, load_urls
+from checker import VersionDetectionError, choose_proxy, classify_navigation_error, detect_variant, is_allowed_url, load_urls, normalize_proxy
 
 
 def test_url_policy_and_deduplication(tmp_path: Path):
@@ -79,3 +79,18 @@ def test_proxy_can_be_disabled(monkeypatch):
     monkeypatch.setenv("PROXY_1_URL", "http://invalid-proxy-1")
     monkeypatch.setenv("PROXY_2_URL", "http://invalid-proxy-2")
     assert choose_proxy() == (None, None)
+
+
+def test_normalizes_host_port_user_password_proxy():
+    proxy = normalize_proxy("185.183.160.117:8000:username:password")
+    assert proxy.playwright_args() == {
+        "server": "http://185.183.160.117:8000",
+        "username": "username",
+        "password": "password",
+    }
+
+
+def test_normalizes_url_proxy():
+    proxy = normalize_proxy("http://username:password@185.183.160.117:8000")
+    assert proxy.playwright_args()["server"] == "http://185.183.160.117:8000"
+    assert proxy.urllib_url() == "http://username:password@185.183.160.117:8000"

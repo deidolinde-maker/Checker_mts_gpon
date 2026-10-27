@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 from playwright.sync_api import Page, Response, sync_playwright
@@ -27,6 +27,28 @@ ERROR_HTTP_STATUSES = {400, 401, 403, 404, 408, 429, 500, 502, 503, 504}
 
 class VersionDetectionError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ProxyConfig:
+    server: str
+    username: str | None = None
+    password: str | None = None
+
+    def playwright_args(self) -> dict[str, str]:
+        args = {"server": self.server}
+        if self.username is not None:
+            args["username"] = self.username
+        if self.password is not None:
+            args["password"] = self.password
+        return args
+
+    def urllib_url(self) -> str:
+        if self.username is None:
+            return self.server
+        parsed = urlsplit(self.server)
+        auth = f"{quote(self.username, safe='')}:{quote(self.password or '', safe='')}@"
+        return f"{parsed.scheme}://{auth}{parsed.hostname}:{parsed.port}"
 
 
 @dataclass
@@ -103,18 +125,37 @@ def proxy_specs() -> list[tuple[str, str | None]]:
     return [(name, os.getenv(name)) for name in ("PROXY_1_URL", "PROXY_2_URL") if os.getenv(name)]
 
 
-def proxy_preflight(proxy_url: str, timeout: float = 10.0) -> bool:
+def normalize_proxy(value: str) -> ProxyConfig:
+    """Accept URL form or HOST:PORT:USERNAME:PASSWORD from Jenkins Secret Text."""
+    raw = value.strip()
+    if "://" not in raw:
+        parts = raw.split(":", 3)
+        if len(parts) != 4 or not parts[0] or not parts[1].isdigit():
+            raise ValueError("proxy must be URL or HOST:PORT:USERNAME:PASSWORD")
+        host, port, username, password = parts
+        return ProxyConfig(f"http://{host}:{port}", username, password)
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or not parsed.port:
+        raise ValueError("proxy URL must contain http/https scheme, host and port")
+    username = unquote(parsed.username) if parsed.username is not None else None
+    password = unquote(parsed.password) if parsed.password is not None else None
+    return ProxyConfig(f"{parsed.scheme}://{parsed.hostname}:{parsed.port}", username, password)
+
+
+def proxy_preflight(proxy: ProxyConfig, timeout: float = 10.0) -> bool:
     """Check proxy connectivity before creating the single browser context."""
     try:
+        proxy_url = proxy.urllib_url()
         opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
-        request = Request(DETECTION_URL, method="HEAD")
-        with opener.open(request, timeout=timeout):
+        request = Request(DETECTION_URL, method="GET")
+        with opener.open(request, timeout=timeout) as response:
+            response.read(1)
             return True
     except Exception:
         return False
 
 
-def choose_proxy() -> tuple[str | None, str | None]:
+def choose_proxy() -> tuple[ProxyConfig | None, str | None]:
     if os.getenv("PROXIES_ENABLED", "true").lower() not in {"1", "true", "yes"}:
         return None, None
     configured = proxy_specs()
@@ -122,8 +163,9 @@ def choose_proxy() -> tuple[str | None, str | None]:
         return None, None
     for name, value in configured:
         assert value is not None
-        if proxy_preflight(value):
-            return value, name.replace("PROXY_", "").replace("_URL", "").lower()
+        proxy = normalize_proxy(value)
+        if proxy_preflight(proxy):
+            return proxy, name.replace("PROXY_", "").replace("_URL", "").lower()
     raise RuntimeError("оба прокси не сработали")
 
 
@@ -194,19 +236,19 @@ def check_url(page: Page, url: str, proxy_name: str | None) -> UrlResult:
 
 def run(checker_root: Path) -> RunReport:
     run_id = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    proxy_url: str | None = None
+    proxy: ProxyConfig | None = None
     proxy_name: str | None = None
     source_file: str | None = None
     detected_variant: str | None = None
     marker_found: bool | None = None
     results: list[UrlResult] = []
     try:
-        proxy_url, proxy_name = choose_proxy()
+        proxy, proxy_name = choose_proxy()
         with sync_playwright() as playwright:
             launch_args: dict[str, Any] = {"headless": True}
-            if proxy_url:
+            if proxy:
                 # Proxy is selected before this single browser/context is created.
-                launch_args["proxy"] = {"server": proxy_url}
+                launch_args["proxy"] = proxy.playwright_args()
             browser = playwright.chromium.launch(**launch_args)
             context = browser.new_context()
             page = context.new_page()
@@ -224,9 +266,10 @@ def run(checker_root: Path) -> RunReport:
                          sum(r.status == "passed" for r in results), sum(r.status == "failed" for r in results),
                          0, [asdict(r) for r in results], "FAILURE", str(exc), "VERSION_DETECTION_ERROR")
     except Exception as exc:
+        error_type = "PROXY_ERROR" if "прокси" in str(exc).lower() else "CHECKER_ERROR"
         return RunReport(run_id, detected_variant, DETECTION_URL, marker_found, source_file, len(results),
                          sum(r.status == "passed" for r in results), sum(r.status == "failed" for r in results),
-                         0, [asdict(r) for r in results], "FAILURE", str(exc), "CHECKER_ERROR")
+                         0, [asdict(r) for r in results], "FAILURE", str(exc), error_type)
     passed = sum(r.status == "passed" for r in results)
     failed = sum(r.status == "failed" for r in results)
     status = "SUCCESS" if failed == 0 else "FAILURE"
@@ -247,7 +290,7 @@ def main() -> int:
 
 def format_russian_notification(report: RunReport) -> str:
     variant = report.detected_variant or "не определён"
-    marker = "найдена" if report.marker_found else "не найдена"
+    marker = "найдена" if report.marker_found is True else "не найдена" if report.marker_found is False else "не определена"
     lines = [
         "🌐 Проверка доступности MTS GPON", "", f"📌 Вариант: {variant}",
         f"🔑 Метка localStorage: {marker}", f"📄 Файл URL: {report.source_file or 'не выбран'}", "",
@@ -255,8 +298,9 @@ def format_russian_notification(report: RunReport) -> str:
         f"❌ Ошибки: {report.failed}", f"⚠️ Предупреждения: {report.warnings}",
     ]
     if report.detection_error:
+        label = "Ошибка определения версии" if report.error_type == "VERSION_DETECTION_ERROR" else "Ошибка запуска"
         lines.extend(["", f"🧩 Тип ошибки: {report.error_type or 'CHECKER_ERROR'}",
-                      f"💬 Ошибка определения версии: {report.detection_error}"])
+                      f"💬 {label}: {report.detection_error}"])
     for item in report.results:
         if item.get("status") == "failed":
             lines.extend([
