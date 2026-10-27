@@ -18,7 +18,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlparse, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from playwright.sync_api import Page, Response, sync_playwright
+from playwright.sync_api import BrowserContext, Page, Response, sync_playwright
 
 MARKER = "landing-yandex-events:v1"
 ALLOWED_HOST = "mts-home-gpon.ru"
@@ -64,6 +64,7 @@ class UrlResult:
     error_type: str | None = None
     message: str | None = None
     redirect_chain: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -81,6 +82,7 @@ class RunReport:
     status: str
     detection_error: str | None = None
     error_type: str | None = None
+    skipped: int = 0
 
 
 def is_allowed_url(value: str) -> bool:
@@ -183,7 +185,10 @@ def choose_proxy() -> tuple[ProxyConfig | None, str | None]:
     if mode == "direct":
         logger.info("[NETWORK] Режим direct: proxy не используется")
         return None, "direct"
-    if mode not in {"auto", "proxy"}:
+    if mode == "proxy":
+        logger.warning("NETWORK_MODE=proxy устарел; используется auto: direct → proxy")
+        mode = "auto"
+    if mode not in {"auto"}:
         raise ValueError("NETWORK_MODE must be 'auto', 'direct' or 'proxy'")
     if mode == "auto":
         logger.info("[NETWORK 1/3] Основной маршрут: direct")
@@ -204,6 +209,26 @@ def choose_proxy() -> tuple[ProxyConfig | None, str | None]:
             return proxy, name.replace("PROXY_", "").replace("_URL", "").lower()
         logger.warning("[NETWORK] Proxy №%s недоступен; переход к следующему proxy", proxy_number)
     raise RuntimeError("оба прокси не сработали")
+
+
+def configured_proxy_candidates() -> list[tuple[ProxyConfig, str]]:
+    """Return proxy candidates without selecting one for the whole run."""
+    mode = os.getenv("NETWORK_MODE", "auto").strip().lower()
+    if mode == "direct":
+        return []
+    candidates: list[tuple[ProxyConfig, str]] = []
+    for name, value in proxy_specs():
+        assert value is not None
+        number = name.replace("PROXY_", "").replace("_URL", "").lower()
+        candidates.append((normalize_proxy(value), number))
+    return candidates
+
+
+def is_retryable_network_failure(result: UrlResult) -> bool:
+    return result.status == "failed" and result.error_type in {
+        "network_error", "navigation_error", "timeout", "dns_error",
+        "connection_refused", "connection_reset", "proxy_error", "ssl_tls_error",
+    }
 
 
 def redirect_chain(response: Response) -> list[str]:
@@ -238,7 +263,10 @@ def check_url(page: Page, url: str, proxy_name: str | None) -> UrlResult:
     page_errors: list[str] = []
     failed_requests: list[str] = []
     on_page_error = lambda exc: page_errors.append(str(exc))
-    on_request_failed = lambda req: failed_requests.append(req.failure or "request failed")
+    def on_request_failed(req):
+        # Aborted subresources are common during normal page loading.
+        if req.is_navigation_request():
+            failed_requests.append(req.failure or "request failed")
 
     def finish(result: UrlResult) -> UrlResult:
         if result.status == "passed":
@@ -249,6 +277,8 @@ def check_url(page: Page, url: str, proxy_name: str | None) -> UrlResult:
             logger.error("[URL] FAIL type=%s http=%s final_url=%s message=%s duration=%.2fs",
                          result.error_type, result.http_status or "-", result.final_url or "-",
                          result.message or "-", result.duration_seconds or 0)
+        if result.warnings:
+            logger.warning("[URL] WARN count=%s details=%s", len(result.warnings), "; ".join(result.warnings))
         return result
 
     page.on("pageerror", on_page_error)
@@ -268,13 +298,9 @@ def check_url(page: Page, url: str, proxy_name: str | None) -> UrlResult:
         if response.status in ERROR_HTTP_STATUSES or response.status >= 400:
             return finish(UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
                                     f"http_{response.status}", response.status_text, chain))
-        if failed_requests:
-            return finish(UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
-                                    "network_error", "; ".join(failed_requests), chain))
-        if page_errors:
-            return finish(UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
-                                    "page_error", "; ".join(page_errors), chain))
-        return finish(UrlResult(url, "passed", response.status, final_url, proxy_name, duration, redirect_chain=chain))
+        warnings = failed_requests + page_errors
+        return finish(UrlResult(url, "passed", response.status, final_url, proxy_name, duration,
+                                redirect_chain=chain, warnings=warnings))
     except Exception as exc:
         return finish(UrlResult(url, "failed", proxy=proxy_name,
                                 duration_seconds=round(time.monotonic() - started, 2),
@@ -286,52 +312,124 @@ def check_url(page: Page, url: str, proxy_name: str | None) -> UrlResult:
 
 def run(checker_root: Path) -> RunReport:
     run_id = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    proxy: ProxyConfig | None = None
-    proxy_name: str | None = None
     source_file: str | None = None
     detected_variant: str | None = None
     marker_found: bool | None = None
     results: list[UrlResult] = []
+    skipped = 0
+    context: BrowserContext | None = None
+    browser = None
     try:
         logger.info("[RUN] Старт проверки; detection_url=%s", DETECTION_URL)
-        proxy, proxy_name = choose_proxy()
+        mode = os.getenv("NETWORK_MODE", "auto").strip().lower() or "auto"
+        proxy_candidates = configured_proxy_candidates()
+        logger.info("[NETWORK] Per-URL режим: direct first; proxy fallback candidates=%s", len(proxy_candidates))
         logger.info("[BROWSER 1/4] Запуск Chromium")
         with sync_playwright() as playwright:
             launch_args: dict[str, Any] = {"headless": True}
-            if proxy:
-                # Proxy is selected before this single browser/context is created.
-                launch_args["proxy"] = proxy.playwright_args()
             browser = playwright.chromium.launch(**launch_args)
             logger.info("[BROWSER 2/4] Browser запущен")
             context = browser.new_context()
             logger.info("[BROWSER 3/4] Создан один browser context; cookies/localStorage сохраняются")
             page = context.new_page()
             try:
-                detected_variant, marker_found = detect_variant(page)
+                detection_used_proxy = False
+                try:
+                    detected_variant, marker_found = detect_variant(page)
+                except VersionDetectionError:
+                    if mode == "direct":
+                        raise
+                    logger.warning("[DETECTION] Direct detection не выполнен; пробуем proxy context")
+                    direct_state = context.storage_state()
+                    context.close()
+                    context = None
+                    detection_succeeded = False
+                    for proxy, proxy_name in proxy_candidates:
+                        logger.info("[DETECTION] Preflight proxy %s", proxy_name)
+                        if not proxy_preflight(proxy):
+                            continue
+                        proxy_context = browser.new_context(proxy=proxy.playwright_args(), storage_state=direct_state)
+                        proxy_page = proxy_context.new_page()
+                        try:
+                            detected_variant, marker_found = detect_variant(proxy_page)
+                            detection_succeeded = True
+                            detection_used_proxy = True
+                            context = proxy_context
+                            page = proxy_page
+                            logger.info("[DETECTION] Успешно через proxy %s; вариант %s", proxy_name, detected_variant)
+                            break
+                        except VersionDetectionError:
+                            logger.warning("[DETECTION] Proxy %s не прошёл detection", proxy_name)
+                            proxy_context.close()
+                    if not detection_succeeded:
+                        raise VersionDetectionError("direct и proxy detection не сработали")
                 source_file = f"urls_variant_{detected_variant.lower()}.txt"
                 urls = load_urls(checker_root / "config" / source_file)
                 logger.info("[RUN] Выбран %s, файл %s, URL к проверке: %s", detected_variant, source_file, len(urls))
+                if detection_used_proxy:
+                    logger.info("[DETECTION] Возврат на direct context после proxy detection")
+                    direct_state = context.storage_state()
+                    context.close()
+                    context = browser.new_context(storage_state=direct_state)
+                    page = context.new_page()
                 for url in urls:
-                    results.append(check_url(page, url, proxy_name))
+                    direct_result = check_url(page, url, "direct")
+                    result = direct_result
+                    if is_retryable_network_failure(direct_result) and mode != "direct" and proxy_candidates:
+                        logger.warning("[URL] Direct не прошёл для %s; начинаем per-URL proxy fallback", url)
+                        direct_state = context.storage_state()
+                        context.close()
+                        context = None
+                        for proxy, proxy_name in proxy_candidates:
+                            logger.info("[URL] Retry через proxy %s: %s", proxy_name, url)
+                            if not proxy_preflight(proxy):
+                                logger.warning("[URL] Proxy %s недоступен; следующий proxy", proxy_name)
+                                continue
+                            proxy_context = browser.new_context(proxy=proxy.playwright_args(), storage_state=direct_state)
+                            proxy_page = proxy_context.new_page()
+                            try:
+                                proxy_variant, _ = detect_variant(proxy_page)
+                                if proxy_variant != detected_variant:
+                                    skipped += 1
+                                    result = UrlResult(
+                                        url, "skipped", proxy=proxy_name,
+                                        duration_seconds=direct_result.duration_seconds,
+                                        error_type="variant_mismatch",
+                                        message=f"proxy variant {proxy_variant} does not match selected variant {detected_variant}",
+                                    )
+                                    logger.warning("[URL] SKIP variant mismatch: selected=%s proxy=%s url=%s",
+                                                    detected_variant, proxy_variant, url)
+                                    break
+                                result = check_url(proxy_page, url, proxy_name)
+                                if result.status == "passed":
+                                    break
+                            finally:
+                                proxy_context.close()
+                        context = browser.new_context(storage_state=direct_state)
+                        page = context.new_page()
+                    results.append(result)
             finally:
                 logger.info("[BROWSER 4/4] Закрытие context и browser")
-                context.close()
+                if context is not None:
+                    context.close()
                 browser.close()
     except VersionDetectionError as exc:
         return RunReport(run_id, detected_variant, DETECTION_URL, marker_found, source_file, len(results),
                          sum(r.status == "passed" for r in results), sum(r.status == "failed" for r in results),
-                         0, [asdict(r) for r in results], "FAILURE", str(exc), "VERSION_DETECTION_ERROR")
+                         0, [asdict(r) for r in results], "FAILURE", str(exc), "VERSION_DETECTION_ERROR", skipped)
     except Exception as exc:
         error_type = "PROXY_ERROR" if "прокси" in str(exc).lower() else "CHECKER_ERROR"
         return RunReport(run_id, detected_variant, DETECTION_URL, marker_found, source_file, len(results),
                          sum(r.status == "passed" for r in results), sum(r.status == "failed" for r in results),
-                         0, [asdict(r) for r in results], "FAILURE", str(exc), error_type)
+                         0, [asdict(r) for r in results], "FAILURE", str(exc), error_type, skipped)
     passed = sum(r.status == "passed" for r in results)
     failed = sum(r.status == "failed" for r in results)
-    status = "SUCCESS" if failed == 0 else "FAILURE"
-    logger.info("[RUN] Завершено: status=%s total=%s passed=%s failed=%s", status, len(results), passed, failed)
+    warnings = sum(len(r.warnings) for r in results) + skipped
+    status = "FAILURE" if failed else "UNSTABLE" if warnings else "SUCCESS"
+    logger.info("[RUN] Завершено: status=%s total=%s passed=%s failed=%s warnings=%s skipped=%s",
+                status, len(results), passed, failed, warnings, skipped)
     return RunReport(run_id, detected_variant, DETECTION_URL, marker_found, source_file, len(results), passed,
-                     failed, 0, [asdict(r) for r in results], status)
+                     failed, warnings, [asdict(r) for r in results], status, skipped=skipped)
 
 
 def main() -> int:
@@ -343,7 +441,7 @@ def main() -> int:
     print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
     if report.status != "SUCCESS":
         print(format_russian_notification(report))
-    return 0 if report.status == "SUCCESS" else 1
+    return 0 if report.status == "SUCCESS" else 2 if report.status == "UNSTABLE" else 1
 
 
 def format_russian_notification(report: RunReport) -> str:
@@ -369,6 +467,13 @@ def format_russian_notification(report: RunReport) -> str:
                 f"⏱️ Время: {item.get('duration_seconds') or 0} сек.",
                 f"🔄 Финальный URL: {item.get('final_url') or 'нет'}",
                 f"💬 {item.get('message') or 'без сообщения'}",
+            ])
+        elif item.get("status") == "skipped":
+            lines.extend([
+                "", "⚠️ URL пропущен из-за несовпадения варианта",
+                f"🔗 URL: {item.get('url')}",
+                f"🛡️ Proxy: {item.get('proxy') or 'direct'}",
+                f"💬 {item.get('message') or 'variant mismatch'}",
             ])
     return "\n".join(lines)
 

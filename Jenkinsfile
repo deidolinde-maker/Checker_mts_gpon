@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        choice(name: 'NETWORK_MODE', choices: ['auto', 'direct', 'proxy'], description: 'auto: direct → proxy №1 → proxy №2; direct: только direct; proxy: только proxy fallback.')
+        choice(name: 'NETWORK_MODE', choices: ['auto', 'direct'], description: 'auto: direct для каждой проверки, затем proxy fallback; direct: только прямое подключение.')
     }
 
     triggers {
@@ -45,13 +45,20 @@ pipeline {
                 }
                 script {
                     def runChecker = {
+                        int rc
                         if (isUnix()) {
-                            sh '"$VENV_DIR/bin/python" -m pytest -q tests && "$VENV_DIR/bin/python" checker.py'
+                            rc = sh(returnStatus: true, script: '"$VENV_DIR/bin/python" -m pytest -q tests && "$VENV_DIR/bin/python" checker.py')
                         } else {
-                            bat '"%VENV_DIR%\\Scripts\\python.exe" -m pytest -q tests && "%VENV_DIR%\\Scripts\\python.exe" checker.py'
+                            rc = bat(returnStatus: true, script: '"%VENV_DIR%\\Scripts\\python.exe" -m pytest -q tests && "%VENV_DIR%\\Scripts\\python.exe" checker.py')
+                        }
+                        if (rc == 2) {
+                            currentBuild.result = 'UNSTABLE'
+                            echo 'Checker completed with skipped URLs; marking build UNSTABLE.'
+                        } else if (rc != 0) {
+                            error("Checker failed with exit code ${rc}")
                         }
                     }
-                    if (params.NETWORK_MODE in ['auto', 'proxy']) {
+                    if (params.NETWORK_MODE == 'auto') {
                         withCredentials([
                             string(credentialsId: 'mts_gpon_proxy_1_url', variable: 'PROXY_1_URL'),
                             string(credentialsId: 'mts_gpon_proxy_2_url', variable: 'PROXY_2_URL')
