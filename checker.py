@@ -6,6 +6,7 @@ from navigation. This makes invalid configuration fail before a browser run.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import sys
@@ -23,6 +24,7 @@ MARKER = "landing-yandex-events:v1"
 ALLOWED_HOST = "mts-home-gpon.ru"
 DETECTION_URL = "https://mts-home-gpon.ru/"
 ERROR_HTTP_STATUSES = {400, 401, 403, 404, 408, 429, 500, 502, 503, 504}
+logger = logging.getLogger("mts_gpon_checker")
 
 
 class VersionDetectionError(RuntimeError):
@@ -107,17 +109,22 @@ def load_urls(path: Path) -> list[str]:
 def detect_variant(page: Page, detection_url: str = DETECTION_URL) -> tuple[str, bool]:
     """Detect A/B without treating localStorage errors as variant A."""
     try:
+        logger.info("[DETECTION 1/3] Открытие detection URL: %s", detection_url)
         response = page.goto(detection_url, wait_until="load")
         if response is None:
             raise VersionDetectionError("detection navigation returned no HTTP response")
         if response.status in ERROR_HTTP_STATUSES or response.status >= 400:
             raise VersionDetectionError(f"detection URL returned HTTP {response.status}")
+        logger.info("[DETECTION 2/3] Страница загружена: HTTP %s, final_url=%s",
+                    response.status, getattr(page, "url", detection_url))
+        logger.info("[DETECTION 3/3] Чтение localStorage key=%s", MARKER)
         value = page.evaluate("key => window.localStorage.getItem(key)", MARKER)
     except VersionDetectionError:
         raise
     except Exception as exc:
         raise VersionDetectionError(f"localStorage/navigation error: {exc}") from exc
     found = value is not None and str(value) != ""
+    logger.info("[DETECTION] marker=%s; выбран вариант %s", "найдена" if found else "не найдена", "B" if found else "A")
     return ("B" if found else "A"), found
 
 
@@ -151,21 +158,51 @@ def proxy_preflight(proxy: ProxyConfig, timeout: float = 10.0) -> bool:
         with opener.open(request, timeout=timeout) as response:
             response.read(1)
             return True
-    except Exception:
+    except Exception as exc:
+        logger.warning("proxy preflight failed: %s", type(exc).__name__)
+        return False
+
+
+def direct_preflight(timeout: float = 10.0) -> bool:
+    """Check the primary direct route without inheriting system proxy settings."""
+    try:
+        opener = build_opener(ProxyHandler({}))
+        request = Request(DETECTION_URL, method="GET")
+        with opener.open(request, timeout=timeout) as response:
+            response.read(1)
+            return True
+    except Exception as exc:
+        logger.warning("direct preflight failed: %s", type(exc).__name__)
         return False
 
 
 def choose_proxy() -> tuple[ProxyConfig | None, str | None]:
-    if os.getenv("PROXIES_ENABLED", "true").lower() not in {"1", "true", "yes"}:
-        return None, None
+    mode = os.getenv("NETWORK_MODE", "").strip().lower()
+    if not mode:
+        mode = "proxy" if os.getenv("PROXIES_ENABLED", "true").lower() in {"1", "true", "yes"} else "direct"
+    if mode == "direct":
+        logger.info("[NETWORK] Режим direct: proxy не используется")
+        return None, "direct"
+    if mode not in {"auto", "proxy"}:
+        raise ValueError("NETWORK_MODE must be 'auto', 'direct' or 'proxy'")
+    if mode == "auto":
+        logger.info("[NETWORK 1/3] Основной маршрут: direct")
+        if direct_preflight():
+            logger.info("[NETWORK] Direct доступен; proxy не используется")
+            return None, "direct"
+        logger.warning("[NETWORK] Direct недоступен; fallback на proxy №1")
     configured = proxy_specs()
     if not configured:
-        return None, None
+        raise RuntimeError("direct недоступен, proxy credentials не заданы")
     for name, value in configured:
         assert value is not None
+        proxy_number = name.replace("PROXY_", "").replace("_URL", "")
+        logger.info("[NETWORK] Проверка proxy №%s", proxy_number)
         proxy = normalize_proxy(value)
         if proxy_preflight(proxy):
+            logger.info("[NETWORK] Proxy №%s доступен; он будет использован для browser context", proxy_number)
             return proxy, name.replace("PROXY_", "").replace("_URL", "").lower()
+        logger.warning("[NETWORK] Proxy №%s недоступен; переход к следующему proxy", proxy_number)
     raise RuntimeError("оба прокси не сработали")
 
 
@@ -197,38 +234,51 @@ def classify_navigation_error(message: str) -> str:
 
 def check_url(page: Page, url: str, proxy_name: str | None) -> UrlResult:
     started = time.monotonic()
+    logger.info("[URL] Проверка начата: %s", url)
     page_errors: list[str] = []
     failed_requests: list[str] = []
     on_page_error = lambda exc: page_errors.append(str(exc))
     on_request_failed = lambda req: failed_requests.append(req.failure or "request failed")
+
+    def finish(result: UrlResult) -> UrlResult:
+        if result.status == "passed":
+            logger.info("[URL] PASS HTTP=%s final_url=%s redirects=%s duration=%.2fs",
+                        result.http_status, result.final_url, max(0, len(result.redirect_chain) - 1),
+                        result.duration_seconds or 0)
+        else:
+            logger.error("[URL] FAIL type=%s http=%s final_url=%s message=%s duration=%.2fs",
+                         result.error_type, result.http_status or "-", result.final_url or "-",
+                         result.message or "-", result.duration_seconds or 0)
+        return result
+
     page.on("pageerror", on_page_error)
     page.on("requestfailed", on_request_failed)
     try:
         response = page.goto(url, wait_until="load")
         duration = round(time.monotonic() - started, 2)
         if response is None:
-            return UrlResult(url, "failed", proxy=proxy_name, duration_seconds=duration,
-                             error_type="navigation_error", message="navigation returned no response")
+            return finish(UrlResult(url, "failed", proxy=proxy_name, duration_seconds=duration,
+                                    error_type="navigation_error", message="navigation returned no response"))
         final_url = page.url
         final_host = urlparse(final_url).hostname
         chain = redirect_chain(response)
         if final_host != ALLOWED_HOST:
-            return UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
-                             "redirect_other_domain", f"final host is {final_host}", chain)
+            return finish(UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
+                                    "redirect_other_domain", f"final host is {final_host}", chain))
         if response.status in ERROR_HTTP_STATUSES or response.status >= 400:
-            return UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
-                             f"http_{response.status}", response.status_text, chain)
+            return finish(UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
+                                    f"http_{response.status}", response.status_text, chain))
         if failed_requests:
-            return UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
-                             "network_error", "; ".join(failed_requests), chain)
+            return finish(UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
+                                    "network_error", "; ".join(failed_requests), chain))
         if page_errors:
-            return UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
-                             "page_error", "; ".join(page_errors), chain)
-        return UrlResult(url, "passed", response.status, final_url, proxy_name, duration, redirect_chain=chain)
+            return finish(UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
+                                    "page_error", "; ".join(page_errors), chain))
+        return finish(UrlResult(url, "passed", response.status, final_url, proxy_name, duration, redirect_chain=chain))
     except Exception as exc:
-        return UrlResult(url, "failed", proxy=proxy_name,
-                         duration_seconds=round(time.monotonic() - started, 2),
-                         error_type=classify_navigation_error(str(exc)), message=str(exc))
+        return finish(UrlResult(url, "failed", proxy=proxy_name,
+                                duration_seconds=round(time.monotonic() - started, 2),
+                                error_type=classify_navigation_error(str(exc)), message=str(exc)))
     finally:
         page.remove_listener("pageerror", on_page_error)
         page.remove_listener("requestfailed", on_request_failed)
@@ -243,22 +293,28 @@ def run(checker_root: Path) -> RunReport:
     marker_found: bool | None = None
     results: list[UrlResult] = []
     try:
+        logger.info("[RUN] Старт проверки; detection_url=%s", DETECTION_URL)
         proxy, proxy_name = choose_proxy()
+        logger.info("[BROWSER 1/4] Запуск Chromium")
         with sync_playwright() as playwright:
             launch_args: dict[str, Any] = {"headless": True}
             if proxy:
                 # Proxy is selected before this single browser/context is created.
                 launch_args["proxy"] = proxy.playwright_args()
             browser = playwright.chromium.launch(**launch_args)
+            logger.info("[BROWSER 2/4] Browser запущен")
             context = browser.new_context()
+            logger.info("[BROWSER 3/4] Создан один browser context; cookies/localStorage сохраняются")
             page = context.new_page()
             try:
                 detected_variant, marker_found = detect_variant(page)
                 source_file = f"urls_variant_{detected_variant.lower()}.txt"
                 urls = load_urls(checker_root / "config" / source_file)
+                logger.info("[RUN] Выбран %s, файл %s, URL к проверке: %s", detected_variant, source_file, len(urls))
                 for url in urls:
                     results.append(check_url(page, url, proxy_name))
             finally:
+                logger.info("[BROWSER 4/4] Закрытие context и browser")
                 context.close()
                 browser.close()
     except VersionDetectionError as exc:
@@ -273,11 +329,13 @@ def run(checker_root: Path) -> RunReport:
     passed = sum(r.status == "passed" for r in results)
     failed = sum(r.status == "failed" for r in results)
     status = "SUCCESS" if failed == 0 else "FAILURE"
-    return RunReport(run_id, variant, DETECTION_URL, marker_found, source_file, len(results), passed,
+    logger.info("[RUN] Завершено: status=%s total=%s passed=%s failed=%s", status, len(results), passed, failed)
+    return RunReport(run_id, detected_variant, DETECTION_URL, marker_found, source_file, len(results), passed,
                      failed, 0, [asdict(r) for r in results], status)
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     root = Path(__file__).resolve().parent
     report = run(root)
     output = Path(os.getenv("REPORT_FILE", "mts_gpon_report.json"))

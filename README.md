@@ -25,6 +25,12 @@ http://USERNAME:PASSWORD@185.183.160.117:8000
 proxy preflight и запускает checker напрямую. Отчёт создаётся в `REPORT_FILE` (по умолчанию
 `mts_gpon_report.json`).
 
+В Jenkins сетевой режим выбирается параметром `NETWORK_MODE`:
+
+- `auto` — основной direct, затем fallback на proxy №1 и proxy №2; это режим по умолчанию;
+- `direct` — прямое подключение без proxy credentials.
+- `proxy` — только proxy №1, затем proxy №2; если оба недоступны, build завершается с ошибкой.
+
 ## Jenkins
 
 Подключите этот файл через `Pipeline script from SCM`. Для pipeline нужны два Jenkins

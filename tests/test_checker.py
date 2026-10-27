@@ -78,7 +78,20 @@ def test_proxy_can_be_disabled(monkeypatch):
     monkeypatch.setenv("PROXIES_ENABLED", "false")
     monkeypatch.setenv("PROXY_1_URL", "http://invalid-proxy-1")
     monkeypatch.setenv("PROXY_2_URL", "http://invalid-proxy-2")
-    assert choose_proxy() == (None, None)
+    assert choose_proxy() == (None, "direct")
+
+
+def test_direct_network_mode_ignores_proxy_values(monkeypatch):
+    monkeypatch.setenv("NETWORK_MODE", "direct")
+    monkeypatch.setenv("PROXY_1_URL", "invalid-proxy-value")
+    assert choose_proxy() == (None, "direct")
+
+
+def test_auto_prefers_direct_before_proxy(monkeypatch):
+    monkeypatch.setenv("NETWORK_MODE", "auto")
+    monkeypatch.setenv("PROXY_1_URL", "invalid-proxy-value")
+    monkeypatch.setattr("checker.direct_preflight", lambda: True)
+    assert choose_proxy() == (None, "direct")
 
 
 def test_normalizes_host_port_user_password_proxy():
