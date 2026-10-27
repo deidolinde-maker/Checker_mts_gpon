@@ -31,6 +31,9 @@ proxy preflight и запускает checker напрямую. Отчёт со�
 - `direct` — прямое подключение без proxy credentials.
 - `proxy` — только proxy №1, затем proxy №2; если оба недоступны, build завершается с ошибкой.
 
+Checker оценивает именно доступность: JS-ошибки страницы не влияют на `passed/failed`.
+Критичны HTTP-статус, SSL/TLS, timeout, DNS/connection errors и redirect на другой домен.
+
 ## Jenkins
 
 Подключите этот файл через `Pipeline script from SCM`. Для pipeline нужны два Jenkins

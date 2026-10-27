@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from checker import VersionDetectionError, choose_proxy, classify_navigation_error, detect_variant, is_allowed_url, load_urls, normalize_proxy
+from notify import split_message
 
 
 def test_url_policy_and_deduplication(tmp_path: Path):
@@ -107,3 +108,9 @@ def test_normalizes_url_proxy():
     proxy = normalize_proxy("http://username:password@185.183.160.117:8000")
     assert proxy.playwright_args()["server"] == "http://185.183.160.117:8000"
     assert proxy.urllib_url() == "http://username:password@185.183.160.117:8000"
+
+
+def test_notification_message_is_split_into_safe_chunks():
+    chunks = split_message("line\n" * 100, limit=40)
+    assert chunks
+    assert all(len(chunk) <= 40 for chunk in chunks)

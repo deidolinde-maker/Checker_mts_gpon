@@ -11,6 +11,23 @@ from urllib.request import Request, urlopen
 from checker import RunReport, format_russian_notification
 
 
+def split_message(message: str, limit: int = 3500) -> list[str]:
+    """Keep proxy/Telegram payloads below common message-size limits."""
+    chunks: list[str] = []
+    current = ""
+    for line in message.splitlines(keepends=True):
+        if current and len(current) + len(line) > limit:
+            chunks.append(current.rstrip())
+            current = ""
+        while len(line) > limit:
+            chunks.append(line[:limit].rstrip())
+            line = line[limit:]
+        current += line
+    if current.strip():
+        chunks.append(current.rstrip())
+    return chunks or [""]
+
+
 def send_report(report_path: Path) -> bool:
     report = RunReport(**json.loads(report_path.read_text(encoding="utf-8")))
     if report.status == "SUCCESS":
@@ -29,21 +46,23 @@ def send_report(report_path: Path) -> bool:
         print(f"Telegram notification skipped; missing: {', '.join(missing)}")
         return False
 
-    message = format_russian_notification(report)
-    payload = json.dumps({
-        "title": "Проверка доступности MTS GPON",
-        "text": html.escape(message),
-        "creds": creds,
-        "parse_mode": "HTML",
-        "disable_notification": False,
-    }, ensure_ascii=False).encode("utf-8")
-    request = Request(endpoint, data=payload, headers={
-        "Content-Type": "application/json",
-        "X-Authentication": auth_secret,
-    }, method="POST")
+    chunks = split_message(format_russian_notification(report))
     try:
-        with urlopen(request, timeout=float(os.getenv("TELEGRAM_PROXY_TIMEOUT_SEC", "15"))) as response:
-            print(f"Telegram notification sent through proxy (status={response.status}).")
+        timeout = float(os.getenv("TELEGRAM_PROXY_TIMEOUT_SEC", "15"))
+        for index, chunk in enumerate(chunks, 1):
+            payload = json.dumps({
+                "title": "Проверка доступности MTS GPON",
+                "text": html.escape(chunk),
+                "creds": creds,
+                "parse_mode": "HTML",
+                "disable_notification": False,
+            }, ensure_ascii=False).encode("utf-8")
+            request = Request(endpoint, data=payload, headers={
+                "Content-Type": "application/json",
+                "X-Authentication": auth_secret,
+            }, method="POST")
+            with urlopen(request, timeout=timeout) as response:
+                print(f"Telegram notification chunk {index}/{len(chunks)} sent (status={response.status}).")
         return True
     except Exception as exc:
         print(f"Telegram notification failed: {exc}")

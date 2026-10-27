@@ -260,9 +260,10 @@ def classify_navigation_error(message: str) -> str:
 def check_url(page: Page, url: str, proxy_name: str | None) -> UrlResult:
     started = time.monotonic()
     logger.info("[URL] Проверка начата: %s", url)
-    page_errors: list[str] = []
     failed_requests: list[str] = []
-    on_page_error = lambda exc: page_errors.append(str(exc))
+    def on_page_error(exc):
+        # JavaScript errors are outside the scope of this availability checker.
+        logger.debug("[URL] JS error ignored for availability: %s", exc)
     def on_request_failed(req):
         # Aborted subresources are common during normal page loading.
         if req.is_navigation_request():
@@ -298,7 +299,7 @@ def check_url(page: Page, url: str, proxy_name: str | None) -> UrlResult:
         if response.status in ERROR_HTTP_STATUSES or response.status >= 400:
             return finish(UrlResult(url, "failed", response.status, final_url, proxy_name, duration,
                                     f"http_{response.status}", response.status_text, chain))
-        warnings = failed_requests + page_errors
+        warnings = failed_requests
         return finish(UrlResult(url, "passed", response.status, final_url, proxy_name, duration,
                                 redirect_chain=chain, warnings=warnings))
     except Exception as exc:

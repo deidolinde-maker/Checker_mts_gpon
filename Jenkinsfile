@@ -78,7 +78,7 @@ pipeline {
         always {
             archiveArtifacts artifacts: 'mts_gpon_report.json', allowEmptyArchive: true
         }
-        failure {
+        unsuccessful {
             script {
                 withCredentials([
                     string(credentialsId: 'telegram_proxy_url', variable: 'TELEGRAM_PROXY_URL'),
