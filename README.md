@@ -40,7 +40,7 @@ Checker оценивает именно доступность: JS-ошибки 
 Secret Text credentials для проверки страниц: `mts_gpon_proxy_1_url` и
 `mts_gpon_proxy_2_url`. Для уведомлений pipeline переиспользует credentials из
 `Everyday_test`: `telegram_proxy_url`, `telegram_proxy_auth_secret` и
-`tg_proxy_creds_survarius`. Агент должен
+`telegram_proxy_global_test`. Агент должен
 иметь Python 3, доступ к PyPI и возможность установить Chromium. Pipeline поддерживает
 Unix и Windows agents, отключает параллельные сборки и архивирует JSON-отчёт.
 

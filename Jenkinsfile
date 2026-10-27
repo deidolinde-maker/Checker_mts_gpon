@@ -81,7 +81,7 @@ pipeline {
                 withCredentials([
                     string(credentialsId: 'telegram_proxy_url', variable: 'TELEGRAM_PROXY_URL'),
                     string(credentialsId: 'telegram_proxy_auth_secret', variable: 'TELEGRAM_PROXY_AUTH_SECRET'),
-                    string(credentialsId: 'tg_proxy_creds_survarius', variable: 'TELEGRAM_PROXY_CREDS')
+                    string(credentialsId: 'telegram_proxy_global_test', variable: 'TELEGRAM_PROXY_CREDS')
                 ]) {
                     if (isUnix()) {
                         sh 'if [ -x "$VENV_DIR/bin/python" ] && [ -f "$REPORT_FILE" ]; then "$VENV_DIR/bin/python" notify.py || true; else echo "Telegram notification skipped: checker runtime/report unavailable."; fi'
