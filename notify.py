@@ -1,4 +1,4 @@
-"""Send a failed MTS GPON report through the existing Telegram proxy endpoint."""
+"""Send an MTS GPON run report through the existing Telegram proxy endpoint."""
 from __future__ import annotations
 
 import html
@@ -29,11 +29,10 @@ def split_message(message: str, limit: int = 3500) -> list[str]:
 
 
 def send_report(report_path: Path) -> bool:
-    report = RunReport(**json.loads(report_path.read_text(encoding="utf-8")))
-    if report.status == "SUCCESS":
-        print("Telegram notification skipped for successful run.")
+    if not report_path.exists():
+        print(f"Telegram notification skipped; report not found: {report_path}")
         return True
-
+    report = RunReport(**json.loads(report_path.read_text(encoding="utf-8")))
     endpoint = os.getenv("TELEGRAM_PROXY_URL", "").strip()
     auth_secret = os.getenv("TELEGRAM_PROXY_AUTH_SECRET", "").strip()
     creds = os.getenv("TELEGRAM_PROXY_CREDS", "").strip()

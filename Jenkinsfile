@@ -77,8 +77,6 @@ pipeline {
     post {
         always {
             archiveArtifacts artifacts: 'mts_gpon_report.json', allowEmptyArchive: true
-        }
-        unsuccessful {
             script {
                 withCredentials([
                     string(credentialsId: 'telegram_proxy_url', variable: 'TELEGRAM_PROXY_URL'),
@@ -86,9 +84,9 @@ pipeline {
                     string(credentialsId: 'tg_proxy_creds_survarius', variable: 'TELEGRAM_PROXY_CREDS')
                 ]) {
                     if (isUnix()) {
-                        sh '"$VENV_DIR/bin/python" notify.py || true'
+                        sh 'if [ -x "$VENV_DIR/bin/python" ] && [ -f "$REPORT_FILE" ]; then "$VENV_DIR/bin/python" notify.py || true; else echo "Telegram notification skipped: checker runtime/report unavailable."; fi'
                     } else {
-                        bat '"%VENV_DIR%\\Scripts\\python.exe" notify.py'
+                        bat 'if exist "%VENV_DIR%\\Scripts\\python.exe" if exist "%REPORT_FILE%" "%VENV_DIR%\\Scripts\\python.exe" notify.py'
                     }
                 }
             }
