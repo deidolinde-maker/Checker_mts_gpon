@@ -11,6 +11,7 @@ import os
 import socket
 import sys
 import time
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -448,6 +449,9 @@ def main() -> int:
     return 0 if report.status == "SUCCESS" else 2 if report.status == "UNSTABLE" else 1
 
 
+TELEGRAM_TEXT_LIMIT = 3500
+
+
 def format_russian_notification(report: RunReport) -> str:
     variant = report.detected_variant or "не определён"
     marker = "найдена" if report.marker_found is True else "не найдена" if report.marker_found is False else "не определена"
@@ -461,25 +465,36 @@ def format_russian_notification(report: RunReport) -> str:
         label = "Ошибка определения версии" if report.error_type == "VERSION_DETECTION_ERROR" else "Ошибка запуска"
         lines.extend(["", f"🧩 Тип ошибки: {report.error_type or 'CHECKER_ERROR'}",
                       f"💬 {label}: {report.detection_error}"])
+    failed_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    skipped_urls: list[str] = []
     for item in report.results:
         if item.get("status") == "failed":
-            lines.extend([
-                "", "❌ Ошибка проверки MTS GPON", f"🔗 URL: {item.get('url')}",
-                f"📡 Ответ: HTTP {item.get('http_status') or 'нет ответа'}",
-                f"🧩 Тип: {item.get('error_type') or 'неизвестен'}",
-                f"🛡️ Прокси: {item.get('proxy') or 'direct'}",
-                f"⏱️ Время: {item.get('duration_seconds') or 0} сек.",
-                f"🔄 Финальный URL: {item.get('final_url') or 'нет'}",
-                f"💬 {item.get('message') or 'без сообщения'}",
-            ])
+            failed_groups[item.get("error_type") or "unknown"].append(item)
         elif item.get("status") == "skipped":
-            lines.extend([
-                "", "⚠️ URL пропущен из-за несовпадения варианта",
-                f"🔗 URL: {item.get('url')}",
-                f"🛡️ Proxy: {item.get('proxy') or 'direct'}",
-                f"💬 {item.get('message') or 'variant mismatch'}",
+            skipped_urls.append(item.get("url") or "неизвестный URL")
+
+    def render(include_urls: bool) -> str:
+        rendered = list(lines)
+        for error_type, items in failed_groups.items():
+            rendered.extend(["", f"❌ Ошибка проверки MTS GPON: {error_type} ({len(items)})"])
+            if include_urls:
+                rendered.extend([
+                    f"Страницы ({len(items)}):",
+                    *[f"- {item.get('url')}" for item in items],
+                ])
+        if skipped_urls:
+            rendered.extend([
+                "", f"⚠️ URL пропущены из-за несовпадения варианта ({len(skipped_urls)})",
             ])
-    return "\n".join(lines)
+            if include_urls:
+                rendered.extend([
+                    f"Страницы ({len(skipped_urls)}):",
+                    *[f"- {url}" for url in skipped_urls],
+                ])
+        return "\n".join(rendered)
+
+    message = render(include_urls=True)
+    return message if len(message) <= TELEGRAM_TEXT_LIMIT else render(include_urls=False)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from checker import VersionDetectionError, choose_proxy, classify_navigation_error, detect_variant, is_allowed_url, load_urls, normalize_proxy
+from checker import RunReport, VersionDetectionError, choose_proxy, classify_navigation_error, detect_variant, format_russian_notification, is_allowed_url, load_urls, normalize_proxy
 from notify import split_message
 
 
@@ -114,3 +114,56 @@ def test_notification_message_is_split_into_safe_chunks():
     chunks = split_message("line\n" * 100, limit=40)
     assert chunks
     assert all(len(chunk) <= 40 for chunk in chunks)
+
+
+def test_notification_groups_failed_urls_by_error_type():
+    report = RunReport(
+        run_id="2026-10-27T13:36:34+00:00",
+        detected_variant="A",
+        detection_url="https://mts-home-gpon.ru/",
+        marker_found=False,
+        source_file="urls_variant_a.txt",
+        total=2,
+        passed=0,
+        failed=2,
+        warnings=0,
+        results=[
+            {"url": "https://mts-home-gpon.ru/a", "status": "failed", "error_type": "http_404"},
+            {"url": "https://mts-home-gpon.ru/b", "status": "failed", "error_type": "http_404"},
+        ],
+        status="FAILURE",
+    )
+
+    message = format_russian_notification(report)
+
+    assert "❌ Ошибка проверки MTS GPON: http_404 (2)" in message
+    assert "Страницы (2):" in message
+    assert "- https://mts-home-gpon.ru/a" in message
+    assert "- https://mts-home-gpon.ru/b" in message
+    assert "📡 Ответ:" not in message
+
+
+def test_notification_uses_counts_when_url_list_exceeds_telegram_limit():
+    report = RunReport(
+        run_id="2026-10-27T13:36:34+00:00",
+        detected_variant="A",
+        detection_url="https://mts-home-gpon.ru/",
+        marker_found=False,
+        source_file="urls_variant_a.txt",
+        total=100,
+        passed=0,
+        failed=100,
+        warnings=0,
+        results=[
+            {"url": f"https://mts-home-gpon.ru/{'x' * 80}{index}", "status": "failed", "error_type": "http_404"}
+            for index in range(100)
+        ],
+        status="FAILURE",
+    )
+
+    message = format_russian_notification(report)
+
+    assert len(message) <= 3500
+    assert "❌ Ошибка проверки MTS GPON: http_404 (100)" in message
+    assert "Страницы (100):" not in message
+    assert "https://mts-home-gpon.ru/" not in message
