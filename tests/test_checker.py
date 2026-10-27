@@ -1,0 +1,81 @@
+from pathlib import Path
+
+import pytest
+
+from checker import VersionDetectionError, choose_proxy, classify_navigation_error, detect_variant, is_allowed_url, load_urls
+
+
+def test_url_policy_and_deduplication(tmp_path: Path):
+    source = tmp_path / "urls.txt"
+    source.write_text("# comment\n\nhttps://mts-home-gpon.ru/a\nhttps://mts-home-gpon.ru/a\nhttps://mts-home-gpon.ru/b\n", encoding="utf-8")
+    assert load_urls(source) == ["https://mts-home-gpon.ru/a", "https://mts-home-gpon.ru/b"]
+
+
+@pytest.mark.parametrize("url", [
+    "http://mts-home-gpon.ru/",
+    "https://other.example/",
+    "https://mts-home-gpon.ru.evil.example/",
+])
+def test_rejects_invalid_url(url: str):
+    assert not is_allowed_url(url)
+
+
+def test_rejects_invalid_file(tmp_path: Path):
+    source = tmp_path / "urls.txt"
+    source.write_text("https://example.com/\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be HTTPS"):
+        load_urls(source)
+
+
+class FakeResponse:
+    def __init__(self, status: int):
+        self.status = status
+
+
+class FakePage:
+    def __init__(self, value, status=200, error=None):
+        self.value = value
+        self.status = status
+        self.error = error
+
+    def goto(self, url, wait_until):
+        if self.error:
+            raise self.error
+        return FakeResponse(self.status)
+
+    def evaluate(self, script, key):
+        return self.value
+
+
+@pytest.mark.parametrize("value, expected", [("event", ("B", True)), (None, ("A", False)), ("", ("A", False))])
+def test_variant_selection(value, expected):
+    assert detect_variant(FakePage(value)) == expected
+
+
+def test_localstorage_error_is_not_variant_a():
+    with pytest.raises(VersionDetectionError, match="localStorage/navigation error"):
+        detect_variant(FakePage(None, error=RuntimeError("security restriction")))
+
+
+def test_detection_http_error_is_not_variant_a():
+    with pytest.raises(VersionDetectionError, match="HTTP 404"):
+        detect_variant(FakePage(None, status=404))
+
+
+@pytest.mark.parametrize("message, expected", [
+    ("net::ERR_NAME_NOT_RESOLVED", "dns_error"),
+    ("net::ERR_CONNECTION_REFUSED", "connection_refused"),
+    ("net::ERR_CONNECTION_RESET", "connection_reset"),
+    ("net::ERR_TIMED_OUT", "timeout"),
+    ("net::ERR_CERT_AUTHORITY_INVALID", "ssl_tls_error"),
+    ("proxy connection failed", "proxy_error"),
+])
+def test_classifies_navigation_errors(message, expected):
+    assert classify_navigation_error(message) == expected
+
+
+def test_proxy_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("PROXIES_ENABLED", "false")
+    monkeypatch.setenv("PROXY_1_URL", "http://invalid-proxy-1")
+    monkeypatch.setenv("PROXY_2_URL", "http://invalid-proxy-2")
+    assert choose_proxy() == (None, None)

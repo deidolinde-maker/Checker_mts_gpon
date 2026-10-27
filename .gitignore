@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+.pytest-tmp/
+*.pyc
+mts_gpon_report.json
+playwright-report/
+test-results/
