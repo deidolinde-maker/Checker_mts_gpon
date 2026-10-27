@@ -1,8 +1,8 @@
 # Checker MTS GPON
 
 Отдельный браузерный checker доступности `mts-home-gpon.ru`. Вариант URL выбирается
-по `localStorage["landing-yandex-events:v1"]`: непустое значение выбирает B, отсутствие
-или пустое значение — A. За один запуск используется один Chromium, один context и одна
+по наличию ключа `localStorage["landing-yandex-events:v1"]`: ключ есть — B, ключа нет — A.
+За один запуск используется один Chromium, один context и одна
 страница; cookies и localStorage не очищаются.
 
 ## Локальный запуск

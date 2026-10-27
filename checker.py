@@ -109,7 +109,7 @@ def load_urls(path: Path) -> list[str]:
 
 
 def detect_variant(page: Page, detection_url: str = DETECTION_URL) -> tuple[str, bool]:
-    """Detect A/B without treating localStorage errors as variant A."""
+    """Detect A/B by localStorage key presence, matching Everyday_test."""
     try:
         logger.info("[DETECTION 1/3] Открытие detection URL: %s", detection_url)
         response = page.goto(detection_url, wait_until="load")
@@ -120,12 +120,15 @@ def detect_variant(page: Page, detection_url: str = DETECTION_URL) -> tuple[str,
         logger.info("[DETECTION 2/3] Страница загружена: HTTP %s, final_url=%s",
                     response.status, getattr(page, "url", detection_url))
         logger.info("[DETECTION 3/3] Чтение localStorage key=%s", MARKER)
-        value = page.evaluate("key => window.localStorage.getItem(key)", MARKER)
+        marker_present = page.evaluate(
+            "key => window.localStorage.getItem(key) !== null",
+            MARKER,
+        )
     except VersionDetectionError:
         raise
     except Exception as exc:
         raise VersionDetectionError(f"localStorage/navigation error: {exc}") from exc
-    found = value is not None and str(value) != ""
+    found = bool(marker_present)
     logger.info("[DETECTION] marker=%s; выбран вариант %s", "найдена" if found else "не найдена", "B" if found else "A")
     return ("B" if found else "A"), found
 

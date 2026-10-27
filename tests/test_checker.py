@@ -48,7 +48,7 @@ class FakePage:
         return self.value
 
 
-@pytest.mark.parametrize("value, expected", [("event", ("B", True)), (None, ("A", False)), ("", ("A", False))])
+@pytest.mark.parametrize("value, expected", [(True, ("B", True)), (False, ("A", False))])
 def test_variant_selection(value, expected):
     assert detect_variant(FakePage(value)) == expected
 
