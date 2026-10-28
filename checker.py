@@ -120,6 +120,8 @@ def detect_variant(page: Page, detection_url: str = DETECTION_URL) -> tuple[str,
             raise VersionDetectionError(f"detection URL returned HTTP {response.status}")
         logger.info("[DETECTION 2/3] Страница загружена: HTTP %s, final_url=%s",
                     response.status, getattr(page, "url", detection_url))
+        # The landing sets the marker asynchronously; match Everyday_test timing.
+        page.wait_for_timeout(500)
         logger.info("[DETECTION 3/3] Чтение localStorage key=%s", MARKER)
         marker_present = page.evaluate(
             "key => window.localStorage.getItem(key) !== null",
@@ -130,6 +132,7 @@ def detect_variant(page: Page, detection_url: str = DETECTION_URL) -> tuple[str,
     except Exception as exc:
         raise VersionDetectionError(f"localStorage/navigation error: {exc}") from exc
     found = bool(marker_present)
+    logger.info("[DETECTION] localStorage marker_present=%s", found)
     logger.info("[DETECTION] marker=%s; выбран вариант %s", "найдена" if found else "не найдена", "B" if found else "A")
     return ("B" if found else "A"), found
 

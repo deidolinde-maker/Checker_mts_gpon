@@ -44,6 +44,9 @@ class FakePage:
             raise self.error
         return FakeResponse(self.status)
 
+    def wait_for_timeout(self, timeout):
+        pass
+
     def evaluate(self, script, key):
         return self.value
 
